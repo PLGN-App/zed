@@ -1,0 +1,72 @@
+name: Build Zed for Windows (Arabic RTL fix)
+
+on:
+  push:
+    branches: [arabic-rtl-fix]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 360
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      # Lighter than Zed's official release profile (thin LTO, 1 codegen unit, debug info),
+      # so it fits a 4-core GitHub runner in reasonable time.
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show disk space
+        run: Get-PSDrive -PSProvider FileSystem
+
+      - name: Ensure MSVC Spectre-mitigated libs
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Write-Output "Visual Studio: $vs"
+          $spectre = Get-ChildItem "$vs\VC\Tools\MSVC\*\lib\spectre\x64" -ErrorAction SilentlyContinue
+          if ($spectre) {
+            Write-Output "Spectre libs present: $($spectre.FullName -join ', ')"
+          } else {
+            Write-Output "Installing Spectre-mitigated libs"
+            $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+            $p = Start-Process -Wait -PassThru -FilePath $installer -ArgumentList @(
+              "modify", "--installPath", "`"$vs`"",
+              "--add", "Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre",
+              "--quiet", "--norestart", "--nocache")
+            Write-Output "vs_installer exit code: $($p.ExitCode)"
+          }
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Build Zed
+        run: cargo build --release -p zed -p cli
+
+      - name: Package
+        run: |
+          $out = "target\release"
+          $pkg = "zed-arabic"
+          New-Item -ItemType Directory -Force "$pkg\x64" | Out-Null
+          Copy-Item "$out\zed.exe" "$pkg\zed.exe"
+          Copy-Item "$out\cli.exe" "$pkg\cli.exe"
+          if (Test-Path "$out\conpty.dll") { Copy-Item "$out\conpty.dll" "$pkg\conpty.dll" }
+          if (Test-Path "$out\OpenConsole.exe") {
+            Copy-Item "$out\OpenConsole.exe" "$pkg\OpenConsole.exe"
+            Copy-Item "$out\OpenConsole.exe" "$pkg\x64\OpenConsole.exe"
+          }
+          Get-ChildItem -Recurse $pkg | Format-Table FullName, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zed-windows-arabic
+          path: zed-arabic
+          retention-days: 30
+
+      - name: Run the RTL fix unit tests
+        continue-on-error: true
+        run: cargo test --release -p gpui_windows --lib direct_write::tests::test_
